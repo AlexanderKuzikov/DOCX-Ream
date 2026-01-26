@@ -2,128 +2,252 @@ const fs = require('fs');
 const path = require('path');
 const axios = require('axios');
 const https = require('https');
-const { Document, Packer, Paragraph, TextRun, AlignmentType, BorderStyle, Table, TableRow, TableCell, WidthType } = require('docx');
 
-// ================= КОНФИГУРАЦИЯ =================
+const {
+  Document,
+  Packer,
+  Paragraph,
+  TextRun,
+  Table,
+  TableRow,
+  TableCell,
+  WidthType,
+  AlignmentType,
+} = require('docx');
+
+// ================= CONFIG =================
+const PROJECT_ROOT = process.cwd();
+
 const CONFIG = {
-    baseUrl: 'https://kombinator',
-    authFile: './auth.json',       // Вынесли авторизацию
-    manifestFile: './manifest.json', // Справочник (БАЗА ЗНАНИЙ)
-    queueFile: './templates.txt',    // Очередь (ЗАДАНИЕ НА СЕЙЧАС)
-    dataDir: './data',
-    outputDir: './output'
+  baseUrl: 'https://kombinator',
+  authFile: path.join(PROJECT_ROOT, 'auth.json'),
+  manifestFile: path.join(PROJECT_ROOT, 'manifest.json'),
+  queueFile: path.join(PROJECT_ROOT, 'templates.txt'),
+  dataDir: path.join(PROJECT_ROOT, 'data'),
+  outputDir: path.join(PROJECT_ROOT, 'output'),
 };
 
 const agent = new https.Agent({ rejectUnauthorized: false });
-const client = axios.create({ baseURL: CONFIG.baseUrl, httpsAgent: agent, timeout: 30000 });
+const client = axios.create({
+  baseURL: CONFIG.baseUrl,
+  httpsAgent: agent,
+  timeout: 60000,
+});
 
-// ... (Функция generateCover остается той же, что и раньше) ...
-// Я её сократил для читаемости, но вставляй полную версию из прошлого ответа
+// ================= HELPERS =================
+function getSafeName(name) {
+  return String(name).replace(/[\\/:*?"<>|]/g, '').trim();
+}
+
+function readJson(filePath) {
+  return JSON.parse(fs.readFileSync(filePath, 'utf8'));
+}
+
+function normalizeDatasetFileName(dsName) {
+  const clean = String(dsName).trim();
+  return clean.toLowerCase().endsWith('.json') ? clean : `${clean}.json`;
+}
 
 async function generateCover(item, datasetNames) {
-    // ... код генерации обложки ...
-    // (Используй код из предыдущего шага, он был отличным)
-    // Вернем заглушку для примера, чтобы код был короче здесь:
-    return new Packer().toBuffer(new Document({ sections: [] })); 
+  const now = new Date();
+  const dateStr = now.toLocaleString('ru-RU', {
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+  });
+
+  const title = new Paragraph({
+    alignment: AlignmentType.CENTER,
+    children: [
+      new TextRun({
+        text: 'ОБЛОЖКА ПАКЕТА ТЕСТИРОВАНИЯ',
+        bold: true,
+        size: 32,
+      }),
+    ],
+  });
+
+  const makeKeyCell = (text) =>
+    new TableCell({
+      shading: { fill: 'EFEFEF' },
+      children: [
+        new Paragraph({
+          children: [new TextRun({ text, bold: true })],
+        }),
+      ],
+    });
+
+  const makeValCell = (text) =>
+    new TableCell({
+      children: [
+        new Paragraph({
+          children: [new TextRun({ text: String(text ?? '') })],
+        }),
+      ],
+    });
+
+  const datasetParagraphs = datasetNames.length
+    ? datasetNames.map((n) =>
+        new Paragraph({
+          children: [new TextRun({ text: `• ${n}` })],
+        })
+      )
+    : [new Paragraph({ children: [new TextRun({ text: '—' })] })];
+
+  const table = new Table({
+    width: { size: 100, type: WidthType.PERCENTAGE },
+    rows: [
+      new TableRow({
+        children: [
+          new TableCell({
+            columnSpan: 2,
+            shading: { fill: 'D9D9D9' },
+            children: [title],
+          }),
+        ],
+      }),
+      new TableRow({
+        children: [makeKeyCell('ID шаблона'), makeValCell(item.id)],
+      }),
+      new TableRow({
+        children: [makeKeyCell('Кейс'), makeValCell(item.case)],
+      }),
+      new TableRow({
+        children: [makeKeyCell('Дата/время прогона'), makeValCell(dateStr)],
+      }),
+      new TableRow({
+        children: [makeKeyCell('Датасеты'), new TableCell({ children: datasetParagraphs })],
+      }),
+    ],
+  });
+
+  const doc = new Document({
+    sections: [
+      {
+        properties: {},
+        children: [
+          new Paragraph({ text: '' }),
+          table,
+          new Paragraph({ text: '' }),
+        ],
+      },
+    ],
+  });
+
+  return Packer.toBuffer(doc);
 }
 
-function getSafeName(name) {
-    return name.replace(/[\\/:*?"<>|]/g, '').trim();
+async function login(auth) {
+  const loginRes = await client.post('/api/v1/account/login', auth);
+  const cookies = loginRes.headers['set-cookie'];
+  if (!cookies) throw new Error('Куки не получены (set-cookie пустой)');
+  return cookies;
 }
 
-async function startBatch() {
-    console.log('🚀 DOCX-Ream: Запуск по очереди templates.txt...\n');
-
-    try {
-        // 1. Проверки файлов
-        if (!fs.existsSync(CONFIG.authFile)) throw new Error('Нет auth.json!');
-        if (!fs.existsSync(CONFIG.manifestFile)) throw new Error('Нет manifest.json!');
-        if (!fs.existsSync(CONFIG.queueFile)) throw new Error('Нет templates.txt!');
-
-        // 2. Читаем конфиги
-        const auth = JSON.parse(fs.readFileSync(CONFIG.authFile, 'utf8'));
-        const manifest = JSON.parse(fs.readFileSync(CONFIG.manifestFile, 'utf8'));
-        
-        // Превращаем массив манифеста в удобный Map для быстрого поиска по ID
-        // Ключ = ID (строкой), Значение = Объект шаблона
-        const manifestMap = new Map(manifest.map(item => [String(item.id), item]));
-
-        // 3. Читаем очередь (templates.txt)
-        const queueIds = fs.readFileSync(CONFIG.queueFile, 'utf8')
-            .split('\n')
-            .map(s => s.trim())
-            .filter(s => s.length > 0 && !s.startsWith('#')); // Игнорим пустые и комменты
-
-        console.log(`📋 В очереди: ${queueIds.length} задач`);
-        console.log(`📚 В реестре: ${manifestMap.size} описаний\n`);
-
-        // 4. Авторизация
-        console.log('🔑 Авторизация...');
-        const loginRes = await client.post('/api/v1/account/login', auth);
-        const cookies = loginRes.headers['set-cookie'];
-        if (!cookies) throw new Error('Куки не получены!');
-        console.log('✅ Вход выполнен.\n');
-
-        // 5. Обработка очереди
-        for (const id of queueIds) {
-            const item = manifestMap.get(id);
-
-            if (!item) {
-                console.warn(`⚠️  ID ${id} не найден в manifest.json! Пропускаем.`);
-                // Тут можно добавить логику "Default Run", если хочешь
-                continue;
-            }
-
-            // Логика "Умной генерации" берется из Манифеста
-            const folderName = `${getSafeName(item.case)} - ${item.id}`;
-            const templateOutputDir = path.join(CONFIG.outputDir, folderName);
-
-            console.log(`📂 [${id}] ${item.case}`);
-
-            if (!fs.existsSync(templateOutputDir)) fs.mkdirSync(templateOutputDir, { recursive: true });
-
-            // Генерируем обложку (нужно вставить полную функцию generateCover выше)
-            try {
-                // ВНИМАНИЕ: Тут нужен реальный вызов полной функции generateCover
-                // const coverBuffer = await generateCover(item, item.datasets); 
-                // fs.writeFileSync(path.join(templateOutputDir, '_ОБЛОЖКА.docx'), coverBuffer);
-            } catch (e) { }
-
-            // Проход по датасетам, указанным в Манифесте
-            for (const dsName of item.datasets) {
-                const dataPath = path.join(CONFIG.dataDir, `${dsName}.json`);
-                
-                if (!fs.existsSync(dataPath)) {
-                    console.log(`   🔸 Нет данных: ${dsName}.json`);
-                    continue;
-                }
-
-                const testData = JSON.parse(fs.readFileSync(dataPath, 'utf8'));
-                
-                try {
-                    const res = await client.post('/api/v2/templates/generatedocument', {
-                        templateId: parseInt(id),
-                        data: testData,
-                        format: "docx"
-                    }, {
-                        headers: { 'Cookie': cookies },
-                        responseType: 'arraybuffer'
-                    });
-
-                    fs.writeFileSync(path.join(templateOutputDir, `${dsName}.docx`), res.data);
-                    console.log(`   ✅ ${dsName}`);
-                } catch (e) {
-                    console.error(`   ❌ ${dsName}: ${e.message}`);
-                }
-            }
-            console.log(''); // Пустая строка между задачами
-        }
-
-        console.log('🏁 Очередь обработана!');
-
-    } catch (err) {
-        console.error('\n📛 Ошибка:', err.message);
+async function generateDocx(templateId, data, cookies) {
+  const res = await client.post(
+    '/api/v2/templates/generatedocument',
+    {
+      templateId: Number(templateId),
+      data,
+      format: 'docx',
+    },
+    {
+      headers: { Cookie: cookies },
+      responseType: 'arraybuffer',
     }
+  );
+  return res.data;
 }
 
-startBatch();
+// ================= MAIN =================
+async function startBatch() {
+  console.log('🚀 DOCX-Ream: запуск');
+  console.log(`📂 PROJECT_ROOT: ${PROJECT_ROOT}`);
+
+  // Preconditions
+  for (const f of [CONFIG.authFile, CONFIG.manifestFile, CONFIG.queueFile]) {
+    if (!fs.existsSync(f)) throw new Error(`Не найден файл: ${f}`);
+  }
+  if (!fs.existsSync(CONFIG.dataDir)) throw new Error(`Не найдена папка data: ${CONFIG.dataDir}`);
+  if (!fs.existsSync(CONFIG.outputDir)) fs.mkdirSync(CONFIG.outputDir, { recursive: true });
+
+  const auth = readJson(CONFIG.authFile);
+  const manifest = readJson(CONFIG.manifestFile);
+
+  const manifestMap = new Map(manifest.map((x) => [String(x.id), x]));
+
+  const queueIds = fs
+    .readFileSync(CONFIG.queueFile, 'utf8')
+    .split('\n')
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0 && !s.startsWith('#'));
+
+  console.log(`📚 Шаблонов в manifest.json: ${manifestMap.size}`);
+  console.log(`📋 Задач в templates.txt: ${queueIds.length}`);
+
+  const cookies = await login(auth);
+  console.log('✅ Авторизация OK');
+
+  for (const id of queueIds) {
+    const item = manifestMap.get(String(id));
+    if (!item) {
+      console.warn(`⚠️  ID ${id} не найден в manifest.json — пропуск`);
+      continue;
+    }
+
+    const folderName = `${getSafeName(item.case)} - ${item.id}`;
+    const templateOutputDir = path.join(CONFIG.outputDir, folderName);
+    if (!fs.existsSync(templateOutputDir)) fs.mkdirSync(templateOutputDir, { recursive: true });
+
+    console.log(`\n📂 ${folderName}`);
+
+    // Cover
+    try {
+      const coverBuffer = await generateCover(item, item.datasets || []);
+      fs.writeFileSync(path.join(templateOutputDir, '_ОБЛОЖКА.docx'), coverBuffer);
+      console.log('   📋 _ОБЛОЖКА.docx');
+    } catch (e) {
+      console.warn(`   ⚠️ Обложка: ${e.message}`);
+    }
+
+    // Datasets
+    const datasets = Array.isArray(item.datasets) ? item.datasets : [];
+
+    for (const dsName of datasets) {
+      const fileName = normalizeDatasetFileName(dsName);
+      const dataPath = path.join(CONFIG.dataDir, fileName);
+
+      if (!fs.existsSync(dataPath)) {
+        console.log(`   🔸 Нет данных: ${fileName}`);
+        continue;
+      }
+
+      let raw = readJson(dataPath);
+      // Поддержка старого формата: если файл содержит { data: {...} }, извлекаем
+      if (raw && typeof raw === 'object' && raw.data && typeof raw.data === 'object') {
+        raw = raw.data;
+      }
+
+      try {
+        const buf = await generateDocx(item.id, raw, cookies);
+        const outPath = path.join(templateOutputDir, fileName.replace(/\.json$/i, '.docx'));
+        fs.writeFileSync(outPath, buf);
+        console.log(`   ✅ ${fileName} -> ${path.basename(outPath)}`);
+      } catch (e) {
+        const msg = e?.response?.data ? `[HTTP] ${e.response.status}` : e.message;
+        console.log(`   ❌ ${fileName}: ${msg}`);
+      }
+    }
+  }
+
+  console.log('\n🏁 Готово');
+}
+
+startBatch().catch((e) => {
+  console.error('\n📛 Ошибка:', e.message);
+  process.exitCode = 1;
+});

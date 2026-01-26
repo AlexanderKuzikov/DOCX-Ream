@@ -72,7 +72,7 @@
   {
     "id": 741,
     "case": "Ходатайство о рассмотрении дела в отсутствие (Судебные издержки по цессии)",
-    "datasets": ["scenario_1", "scenario_2", "scenario_3"]
+    "datasets": ["scenario_4ces", "scenario_5ces", "scenario_6ces"]
   },
   {
     "id": 742,
