@@ -1,0 +1,16 @@
+POST https://app.kombinator.ru/api/v2/templates/generatedocument
+Body: application/json
+{
+   "templateId": <744>,
+   "data": 
+      {
+        "<наименование простого поля>": "<значение поля>",
+        "<наименование составного поля>"
+            {
+              "<наименование вложенного поля>": "<значение вложенного поля>",  
+              …
+            }
+            …
+      },
+    "format": <"docx">
+}
