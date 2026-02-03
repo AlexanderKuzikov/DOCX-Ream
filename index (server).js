@@ -19,7 +19,7 @@ const {
 const PROJECT_ROOT = process.cwd();
 
 const CONFIG = {
-  baseUrl: 'https://app.kombinator.ru',
+  baseUrl: 'https://kombinator',
   authFile: path.join(PROJECT_ROOT, 'auth.json'),
   manifestFile: path.join(PROJECT_ROOT, 'manifest.json'),
   queueFile: path.join(PROJECT_ROOT, 'templates.txt'),
